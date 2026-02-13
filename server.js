@@ -13,6 +13,7 @@ const PASSWORD = 'u1234';
 
 // Store session cookies
 let sessionCookies = '';
+let sessionExpiry = 0;
 
 // Login to UPEM
 async function login() {
@@ -23,29 +24,37 @@ async function login() {
         const initResponse = await axios.get(UPEM_BASE_URL, {
             headers: {
                 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
-            }
+            },
+            maxRedirects: 5
         });
         
         const initCookies = initResponse.headers['set-cookie'] || [];
+        const cookieHeader = initCookies.map(c => c.split(';')[0]).join('; ');
         
         // Login request
-        const loginResponse = await axios.post(`${UPEM_BASE_URL}/negozio?f=eice.cms.entities.events.RefreshAccountEvent&Sender=LoginServiceController&SenderId=__89a9a9&Context=`, {
-            username: USERNAME,
-            password: PASSWORD,
-            rememberMe: true
-        }, {
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
-                'Content-Type': 'application/x-www-form-urlencoded',
-                'Cookie': initCookies.join('; ')
-            },
-            maxRedirects: 5,
-            validateStatus: () => true
-        });
+        const loginData = new URLSearchParams();
+        loginData.append('username', USERNAME);
+        loginData.append('password', PASSWORD);
+        loginData.append('rememberMe', 'true');
+        
+        const loginResponse = await axios.post(
+            `${UPEM_BASE_URL}/negozio?f=eice.cms.entities.events.RefreshAccountEvent&Sender=LoginServiceController&SenderId=__89a9a9&Context=`,
+            loginData,
+            {
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    'Cookie': cookieHeader
+                },
+                maxRedirects: 5,
+                validateStatus: () => true
+            }
+        );
         
         // Store session cookies
         const cookies = loginResponse.headers['set-cookie'] || [];
         sessionCookies = cookies.map(c => c.split(';')[0]).join('; ');
+        sessionExpiry = Date.now() + (30 * 60 * 1000); // 30 minutes
         
         console.log('Login successful!');
         return true;
@@ -55,11 +64,16 @@ async function login() {
     }
 }
 
+// Check if session is valid
+function isSessionValid() {
+    return sessionCookies && Date.now() < sessionExpiry;
+}
+
 // Search vehicle by plate
 async function searchByPlate(plate) {
     try {
         // Ensure we're logged in
-        if (!sessionCookies) {
+        if (!isSessionValid()) {
             const loggedIn = await login();
             if (!loggedIn) {
                 throw new Error('Login failed');
@@ -95,7 +109,7 @@ async function searchByPlate(plate) {
         };
         
         // Find the vehicle in the results table
-        $('table tbody tr').each((i, row) => {
+        $('table tbody tr').first().each((i, row) => {
             const cells = $(row).find('td');
             if (cells.length >= 5) {
                 vehicleData.brand = $(cells[0]).text().trim();
@@ -105,13 +119,15 @@ async function searchByPlate(plate) {
                 vehicleData.vin = $(cells[4]).text().trim();
                 
                 // Extract registration date if available
-                const dateMatch = $(cells[5]).text().trim();
-                if (dateMatch) {
-                    vehicleData.registrationDate = dateMatch;
-                    // Extract year from date (format: DD/MM/YYYY)
-                    const yearMatch = dateMatch.match(/\d{4}$/);
-                    if (yearMatch) {
-                        vehicleData.year = yearMatch[0];
+                if (cells.length >= 6) {
+                    const dateMatch = $(cells[5]).text().trim();
+                    if (dateMatch) {
+                        vehicleData.registrationDate = dateMatch;
+                        // Extract year from date (format: DD/MM/YYYY)
+                        const yearMatch = dateMatch.match(/\d{4}$/);
+                        if (yearMatch) {
+                            vehicleData.year = yearMatch[0];
+                        }
                     }
                 }
             }
@@ -136,7 +152,10 @@ app.post('/api/lookup-plate', async (req, res) => {
         const { plate } = req.body;
         
         if (!plate) {
-            return res.status(400).json({ error: 'Plate number required' });
+            return res.status(400).json({ 
+                success: false,
+                error: 'Plate number required' 
+            });
         }
         
         const vehicleData = await searchByPlate(plate);
@@ -156,7 +175,18 @@ app.post('/api/lookup-plate', async (req, res) => {
 
 // Health check
 app.get('/api/health', (req, res) => {
-    res.json({ status: 'ok' });
+    res.json({ status: 'ok', uptime: process.uptime() });
+});
+
+// Root endpoint
+app.get('/', (req, res) => {
+    res.json({ 
+        message: 'UPEM API Server',
+        endpoints: {
+            health: '/api/health',
+            lookup: 'POST /api/lookup-plate'
+        }
+    });
 });
 
 const PORT = process.env.PORT || 3000;
